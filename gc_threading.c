@@ -9,9 +9,9 @@
 #define MODE_DUAL 2
 #define MODE_SINGLE_THREAD_TWICE 3
 
-static int mode = MODE_SINGLE_THREAD_TWICE;
+static int mode = MODE_MULTITHREAD;
 
-#define NTHREADS 4
+#define NTHREADS 1
 #define GLOBAL_QUEUE_SIZE 500 /*TODO*/
 #define GLOBAL_QUEUE_SIZE_MIN (GLOBAL_QUEUE_SIZE / 4)
 #define LOCAL_QUEUE_SIZE 200 /*TODO*/
@@ -42,9 +42,21 @@ static int mode = MODE_SINGLE_THREAD_TWICE;
  * Deque
  */
 
+#define ASSERT_IN_BOUNDS_EXCL(_val, _deque)    \
+    assert(_val >= 0);                         \
+    assert(_val < _deque->max_length);          
+
+#define ASSERT_IN_BOUNDS_INCL(_val, _deque)    \
+    assert(_val >= 0);                         \
+    assert(_val <= _deque->max_length);          
+
+
 #define ASSERT_SANE_DEQUE(d) do {               \
         assert(d != NULL);                      \
         assert(d->max_length >= 0);             \
+        ASSERT_IN_BOUNDS_INCL(d->length, d);    \
+        ASSERT_IN_BOUNDS_EXCL(d->tail, d);      \
+        ASSERT_IN_BOUNDS_EXCL(d->head, d);      \
     } while(0);
 
 typedef struct deque_struct {
@@ -55,6 +67,7 @@ typedef struct deque_struct {
     int tail;
 } deque_t;
 
+pthread_key_t thread_id_k;
 static void deque_init(deque_t* deque, int max_length) {
     //TODO: check error and handle this reasonably
     VALUE* buffer = (VALUE*) malloc(sizeof(VALUE)*max_length);
@@ -94,7 +107,7 @@ static int deque_full_p(deque_t* deque) {
 
 static int deque_push(deque_t* deque, VALUE val) {
   ASSERT_SANE_DEQUE(deque);
-
+  
   if (deque_full_p(deque))
     return 0;
 
@@ -103,6 +116,7 @@ static int deque_push(deque_t* deque, VALUE val) {
 
   deque->buffer[deque->tail] = val;
   deque->length++;
+  ASSERT_SANE_DEQUE(deque);
   return 1;
 }
 
@@ -111,14 +125,14 @@ static VALUE deque_pop(deque_t* deque) {
 
   ASSERT_SANE_DEQUE(deque);
 
-  if (deque_empty_p(deque))
-    return DEQUE_EMPTY;
-  assert(deque->tail >= 0);
+  assert(! deque_empty_p(deque));
   rtn = deque->buffer[deque->tail];
 
   deque->tail = POS_MOD(deque->tail - 1, deque->max_length);
 
   deque->length--;
+
+  ASSERT_SANE_DEQUE(deque);
   return rtn;
 }
 
@@ -128,15 +142,16 @@ static VALUE deque_pop_back(deque_t* deque) {
 
   ASSERT_SANE_DEQUE(deque);
 
-  if (deque_empty_p(deque))
-    return DEQUE_EMPTY;
+  assert(! deque_empty_p(deque));
+
   index = deque->head;
-  assert(index >= 0);
+  assert(index >= 0 && index < deque->max_length);
   rtn = deque->buffer[index];
 
   deque->head = POS_MOD(deque->head - 1, deque->max_length);
 
   deque->length--;
+  ASSERT_SANE_DEQUE(deque);
   return rtn;
 }
 
@@ -234,7 +249,7 @@ static void global_queue_offer_work(global_queue_t* global_queue, deque_t* local
 void* active_objspace;
 global_queue_t* global_queue;
 pthread_key_t thread_local_deque_k;
-pthread_key_t thread_id_k;
+
 
 static void* mark_run_loop(void* arg) {
     long thread_id = (long) arg;
@@ -303,10 +318,12 @@ static void gc_mark_parallel(void* objspace) {
 }
 
 void gc_mark_defer(void *objspace, VALUE ptr, int lev) {
+    int tid = *((int*)pthread_getspecific(thread_id_k));
     deque_t* deque = (deque_t*) pthread_getspecific(thread_local_deque_k);
     if (deque_push(deque, ptr) == 0) {
         global_queue_offer_work(global_queue, deque);
         if (deque_push(deque, ptr) == 0) {
+            printf("Thread %d: Both queues full\n", tid);
             gc_do_mark(objspace, ptr);
         }
     }
